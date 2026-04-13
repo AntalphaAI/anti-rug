@@ -34,16 +34,19 @@ logger = logging.getLogger(__name__)
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
-    """Safely convert value to float."""
+    """Safely convert value to float, return 0 for negative values."""
     try:
-        return float(value) if value not in (None, "", "null") else default
+        val = float(value) if value not in (None, "", "null") else default
+        return max(0.0, val)
     except (ValueError, TypeError):
         return default
 
 
 def is_flag(val: Any) -> bool:
-    """Check if GoPlus flag is set ("1" = True)."""
-    return str(val).strip() == "1"
+    """Check if GoPlus flag is set ("1" = True, bool True = True)."""
+    if isinstance(val, bool):
+        return val
+    return str(val).strip() in ("1", "true", "True")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -272,23 +275,28 @@ def compute_risk_score(
     
     # Contract security (0-100, lower is better)
     contract_risk = 0
-    if indicators["is_honeypot"]:
+    if indicators.get("is_honeypot", False):
         contract_risk = 100
-    elif indicators["hidden_owner"]:
+    elif indicators.get("hidden_owner", False):
         contract_risk = 90
-    elif indicators["selfdestruct"]:
+    elif indicators.get("selfdestruct", False):
         contract_risk = 95
-    elif not indicators["is_open_source"]:
+    elif not indicators.get("is_open_source", False):
         contract_risk = 40
     
     # Tax risk
-    tax_risk = min(100, max(indicators["buy_tax"], indicators["sell_tax"]) * 2)
+    tax_risk = min(100, max(indicators.get("buy_tax", 0.0), indicators.get("sell_tax", 0.0)) * 2)
     
     # Liquidity risk
-    liquidity_risk = max(0, 100 - indicators["lp_locked_pct"])
+    liquidity_risk = max(0, 100 - indicators.get("lp_locked_pct", 0.0))
+    
+    # IMPROVE-01: Scenario B 特殊处理：主流生态代币通常不锁LP，降低流动性风险误判
+    if sc == "B" and indicators.get("lp_locked_pct", 0.0) == 0 and indicators.get("holder_count", 0) > 10000:
+        # 持有人超过1万的成熟代币，LP未锁仓属于正常情况，风险打3折
+        liquidity_risk = liquidity_risk * 0.3
     
     # Concentration risk
-    effective_concentration = max(0, indicators["top10_pct"] - indicators["protocol_held_pct"])
+    effective_concentration = max(0, indicators.get("top10_pct", 0.0) - indicators.get("protocol_held_pct", 0.0))
     concentration_risk = min(100, effective_concentration * 1.5)
     
     # Base score
@@ -334,15 +342,28 @@ def generate_verdict(
     # Fatal findings override everything
     if fatals:
         if sc == "A":
-            return {
-                "risk_level": "CRITICAL",
-                "risk_label": "🛑 COUNTERFEIT",
-                "verdict": (
-                    f"🛑 COUNTERFEIT DETECTED! This token claims to be a {scenario['label']} "
-                    f"but has fatal flaws: {', '.join(f['code'] for f in fatals)}. "
-                    "Verify contract address against official sources immediately."
-                ),
-            }
+            # IMPROVE-02: Scenario A 单独BALANCE_MANIPULATION是合规功能，不是漏洞
+            fatal_codes = [f["code"] for f in fatals]
+            if len(fatal_codes) == 1 and fatal_codes[0] == "BALANCE_MANIPULATION":
+                return {
+                    "risk_level": "LOW",
+                    "risk_label": "ℹ️ Known Institutional Feature",
+                    "verdict": (
+                        f"ℹ️ Notice: This {scenario['label']} has official balance modification permission "
+                        "which is used for compliance freezing (standard for regulated stablecoins). "
+                        "This is expected behavior for legitimate institutional tokens, not a vulnerability."
+                    ),
+                }
+            else:
+                return {
+                    "risk_level": "CRITICAL",
+                    "risk_label": "🛑 COUNTERFEIT",
+                    "verdict": (
+                        f"🛑 COUNTERFEIT DETECTED! This token claims to be a {scenario['label']} "
+                        f"but has fatal flaws: {', '.join(f['code'] for f in fatals)}. "
+                        "Verify contract address against official sources immediately."
+                    ),
+                }
         return {
             "risk_level": "CRITICAL",
             "risk_label": "🛑 DO NOT BUY",

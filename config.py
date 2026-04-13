@@ -11,7 +11,7 @@ from typing import Set, List, Dict, Any
 
 GOPLUS_ENDPOINTS: List[str] = [
     "https://api.gopluslabs.io",
-    "https://api.gopluslabs.io",  # Retry fallback
+    "https://openapi.gopluslabs.io",  # Retry fallback
 ]
 
 REQUEST_TIMEOUT: int = 8
